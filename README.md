@@ -258,12 +258,9 @@ database
     └── test_database.py
 ```
 
-## Демонстрации
 
-Записи работы программы добавляются ниже после публикации
-на asciinema.org.
+## Демонстрация
 
-read -r -p "https://asciinema.org/a/dFz2UOXf1kPms4fV" CAST_URL
+Запись полного сценария работы базы данных:
 
-printf '\n### Управление таблицами\n\n&lt;a href="%s"&gt;&lt;img src="%s.svg" alt="Управление таблицами" width="800"&gt;&lt;/a&gt;\n' \
-  "$CAST_URL" "$CAST_URL" &gt;&gt; README.md
+<a href="https://asciinema.org/a/vMD1H8vsPk97JCHL"><img src="https://asciinema.org/a/vMD1H8vsPk97JCHL.svg" alt="Полный сценарий работы базы данных" width="800"></a>

@@ -4,12 +4,29 @@ version = "0.1.0"
 description = "A simple educational command-line database"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "prettytable>=3.12.0",
+    "prompt>=0.4.1",
+]
 
 [project.scripts]
 project = "primitive_db.main:main"
 database = "primitive_db.main:main"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.9.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.8.0,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+exclude = ["venv", ".venv", "dist", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = []

@@ -264,3 +264,16 @@ database
 Запись полного сценария работы базы данных:
 
 <a href="https://asciinema.org/a/vMD1H8vsPk97JCHL"><img src="https://asciinema.org/a/vMD1H8vsPk97JCHL.svg" alt="Полный сценарий работы базы данных" width="800"></a>
+
+
+## Финальная локальная проверка
+
+Перед сдачей успешно выполнены:
+```bash
+make install
+make lint
+make test
+make build
+```
+
+В README встроена запись полного сценария работы базы данных.

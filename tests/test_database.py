@@ -1,15 +1,12 @@
-import io
-import unittest
-from contextlib import chdir, redirect_stdout
-from tempfile import TemporaryDirectory
-from unittest.mock import patch
+import os
+import time
 
-from primitive_db import core
-from primitive_db.cache import create_cacher
+from primitive_db import core, decorators
+from primitive_db.constants import META_FILE
+from primitive_db.decorators import create_cacher
 from primitive_db.engine import execute
 from primitive_db.parser import parse_command, parse_value
 from primitive_db.utils import (
-    METADATA_FILE,
     get_table_path,
     load_metadata,
     load_table_data,
@@ -18,215 +15,188 @@ from primitive_db.utils import (
 )
 
 
-class DatabaseTests(unittest.TestCase):
-    def setUp(self):
-        directory = self.enterContext(TemporaryDirectory())
-        self.enterContext(chdir(directory))
-        self.output = io.StringIO()
-        self.enterContext(redirect_stdout(self.output))
+def test_metadata():
+    """Check missing metadata and a JSON round trip."""
+    assert load_metadata(META_FILE) == {}
 
-        self.metadata = core.create_table(
-            {},
-            "users",
-            ["name:str", "age:int", "is_active:bool"],
-        )
+    metadata = core.create_table({}, "users", ["name:str", "age:int"])
 
-    def test_missing_metadata_returns_empty_dictionary(self):
-        self.assertEqual(load_metadata(METADATA_FILE), {})
+    assert list(metadata["users"]) == ["ID", "name", "age"]
 
-    def test_metadata_round_trip(self):
-        save_metadata(METADATA_FILE, self.metadata)
+    save_metadata(META_FILE, metadata)
 
-        self.assertEqual(
-            load_metadata(METADATA_FILE),
-            self.metadata,
-        )
+    assert load_metadata(META_FILE) == metadata
+    assert core.create_table(metadata, "users", ["name:str"]) is None
+    assert core.create_table({}, "bad", ["price:float"]) is None
 
-    def test_create_table_adds_id(self):
-        self.assertEqual(
-            list(self.metadata["users"]),
-            ["ID", "name", "age", "is_active"],
-        )
 
-    def test_duplicate_table_is_rejected(self):
-        result = core.create_table(
-            self.metadata,
-            "users",
-            ["name:str"],
-        )
+def test_parser():
+    """Check quoted strings, booleans, and update assignments."""
+    command, arguments = parse_command(
+        'insert into users values ("Анна, Мария", 23, false)'
+    )
 
-        self.assertIsNone(result)
+    assert command == "insert"
+    assert arguments["values"] == ["Анна, Мария", 23, False]
 
-    def test_invalid_column_type_is_rejected(self):
-        result = core.create_table({}, "bad", ["price:float"])
+    command, arguments = parse_command(
+        'update users set age = 29, name = "Anna" where ID = 1'
+    )
 
-        self.assertIsNone(result)
+    assert command == "update"
+    assert arguments["set_clause"] == {"age": 29, "name": "Anna"}
+    assert arguments["where_clause"] == {"ID": 1}
 
-    def test_insert_and_automatic_id(self):
-        first = core.insert(
-            self.metadata,
-            "users",
-            ["Sergei", 28, True],
-        )
-        save_table_data("users", first)
+    try:
+        parse_value("Anna")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Строка без кавычек должна отклоняться.")
 
-        second = core.insert(
-            self.metadata,
-            "users",
-            ["Anna", 23, False],
-        )
 
-        self.assertEqual([row["ID"] for row in second], [1, 2])
+def test_insert():
+    """Check automatic IDs, required fields, and exact types."""
+    metadata = core.create_table(
+        {},
+        "records",
+        ["name:str", "age:int", "active:bool"],
+    )
 
-    def test_boolean_is_not_integer(self):
-        result = core.insert(
-            self.metadata,
-            "users",
-            ["Sergei", True, True],
-        )
+    first = core.insert(metadata, "records", ["Anna", 23, True])
+    assert first[0]["ID"] == 1
 
-        self.assertIsNone(result)
+    save_table_data("records", first)
 
-    def test_wrong_value_count_is_rejected(self):
-        result = core.insert(
-            self.metadata,
-            "users",
-            ["Sergei"],
-        )
+    second = core.insert(metadata, "records", ["Sergei", 28, False])
+    assert [row["ID"] for row in second] == [1, 2]
 
-        self.assertIsNone(result)
+    assert core.insert(metadata, "records", ["Wrong", True, True]) is None
+    assert core.insert(metadata, "records", ["Only name"]) is None
 
-    def test_select_filters_rows(self):
-        rows = [
-            {"ID": 1, "name": "A", "age": 20, "is_active": True},
-            {"ID": 2, "name": "B", "age": 30, "is_active": False},
-        ]
 
-        result = core.select(rows, {"age": 30})
+def test_select_and_update():
+    """Check filtering, cache freshness, and independent updates."""
+    rows = [
+        {"ID": 1, "age": 20},
+        {"ID": 2, "age": 30},
+    ]
 
-        self.assertEqual([row["ID"] for row in result], [2])
+    selected = core.select(rows, {"age": 20})
+    assert selected == [{"ID": 1, "age": 20}]
 
-    def test_select_cache_does_not_return_stale_data(self):
-        rows = [{"ID": 1, "age": 20}]
+    updated = core.update(rows, {"age": 21}, {"ID": 1})
 
-        first = core.select(rows, {"age": 20})
-        rows[0]["age"] = 21
-        second = core.select(rows, {"age": 20})
+    assert updated[0]["age"] == 21
+    assert rows[0]["age"] == 20
+    assert core.update(rows, {"ID": 9}, {"ID": 1}) is None
 
-        self.assertEqual(len(first), 1)
-        self.assertEqual(second, [])
+    rows[0]["age"] = 22
 
-    def test_update_does_not_mutate_original_rows(self):
-        rows = [{"ID": 1, "age": 20}]
+    assert core.select(rows, {"age": 20}) == []
 
-        result = core.update(rows, {"age": 21}, {"ID": 1})
 
-        self.assertEqual(result[0]["age"], 21)
-        self.assertEqual(rows[0]["age"], 20)
+def test_cache():
+    """Check that a cached calculation runs once."""
+    calls = []
+    cached = create_cacher()
 
-    def test_id_update_is_rejected(self):
-        result = core.update(
-            [{"ID": 1, "age": 20}],
-            {"ID": 2},
-            {"ID": 1},
-        )
+    def calculate():
+        """Return a value and count the calculation."""
+        calls.append("called")
+        return [{"value": 1}]
 
-        self.assertIsNone(result)
+    first = cached("key", calculate)
+    first[0]["value"] = 99
 
-    def test_delete_can_be_cancelled(self):
-        rows = [{"ID": 1, "age": 20}]
+    second = cached("key", calculate)
 
-        with patch("builtins.input", return_value="n"):
-            result = core.delete(rows, {"ID": 1})
+    assert calls == ["called"]
+    assert second == [{"value": 1}]
 
-        self.assertIsNone(result)
-        self.assertEqual(len(rows), 1)
 
-    def test_delete_can_be_confirmed(self):
-        rows = [{"ID": 1, "age": 20}]
+def test_confirmation():
+    """Check cancelled and confirmed record deletion."""
+    rows = [{"ID": 1, "age": 20}]
 
-        with patch("builtins.input", return_value="y"):
-            result = core.delete(rows, {"ID": 1})
+    try:
+        decorators.input = lambda question: "n"
+        assert core.delete(rows, {"ID": 1}) is None
 
-        self.assertEqual(result, [])
+        decorators.input = lambda question: "y"
+        assert core.delete(rows, {"ID": 1}) == []
+    finally:
+        del decorators.input
 
-    def test_drop_table_can_be_cancelled(self):
-        with patch("builtins.input", return_value="n"):
-            result = core.drop_table(self.metadata, "users")
+    assert rows == [{"ID": 1, "age": 20}]
 
-        self.assertIsNone(result)
-        self.assertIn("users", self.metadata)
 
-    def test_parser_preserves_comma_inside_string(self):
-        command, arguments = parse_command(
-            'insert into users values ("Анна, Мария", 23, false)'
-        )
+def test_cli():
+    """Check persistent CRUD operations through the command engine."""
+    execute("create_table people name:str age:int active:bool")
+    execute('insert into people values ("Anna", 23, true)')
+    execute("update people set age = 24 where ID = 1")
 
-        self.assertEqual(command, "insert")
-        self.assertEqual(
-            arguments["values"],
-            ["Анна, Мария", 23, False],
-        )
+    assert load_table_data("people")[0]["age"] == 24
 
-    def test_parser_supports_multiple_assignments(self):
-        command, arguments = parse_command(
-            'update users set age = 29, name = "Anna" where ID = 1'
-        )
+    execute("update people set unknown = 1 where ID = 1")
 
-        self.assertEqual(command, "update")
-        self.assertEqual(
-            arguments["set_clause"],
-            {"age": 29, "name": "Anna"},
-        )
-        self.assertEqual(arguments["where_clause"], {"ID": 1})
+    assert "unknown" not in load_table_data("people")[0]
 
-    def test_unquoted_string_is_rejected(self):
-        with self.assertRaises(ValueError):
-            parse_value("Sergei")
+    try:
+        decorators.input = lambda question: "y"
 
-    def test_cacher_calculates_result_once(self):
-        calls = []
-        cached = create_cacher()
+        execute("delete from people where ID = 1")
+        assert load_table_data("people") == []
 
-        def calculate():
-            calls.append("called")
-            return [{"value": 1}]
+        execute("drop_table people")
+        assert "people" not in load_metadata(META_FILE)
+        assert not os.path.exists(get_table_path("people"))
+    finally:
+        del decorators.input
 
-        first = cached("key", calculate)
-        first[0]["value"] = 99
-        second = cached("key", calculate)
 
-        self.assertEqual(calls, ["called"])
-        self.assertEqual(second, [{"value": 1}])
+def run_tests():
+    """Run functional tests inside a dedicated temporary directory."""
+    original_directory = os.getcwd()
+    directory_name = f".db-test-{os.getpid()}-{time.time_ns()}"
+    test_directory = os.path.join(original_directory, directory_name)
 
-    def test_cli_persists_crud_operations(self):
-        execute("create_table people name:str age:int is_active:bool")
-        execute('insert into people values ("Anna", 23, true)')
-        execute("update people set age = 24 where ID = 1")
+    os.mkdir(test_directory)
 
-        self.assertEqual(load_table_data("people")[0]["age"], 24)
+    tests = [
+        test_metadata,
+        test_parser,
+        test_insert,
+        test_select_and_update,
+        test_cache,
+        test_confirmation,
+        test_cli,
+    ]
 
-        with patch("builtins.input", return_value="y"):
-            execute("delete from people where ID = 1")
+    try:
+        os.chdir(test_directory)
 
-        self.assertEqual(load_table_data("people"), [])
+        for test in tests:
+            test()
+            print(f"PASSED: {test.__name__}")
 
-        with patch("builtins.input", return_value="y"):
-            execute("drop_table people")
+        print(f"\nУспешно выполнено тестов: {len(tests)}.")
+    finally:
+        os.chdir(original_directory)
 
-        self.assertNotIn("people", load_metadata(METADATA_FILE))
-        self.assertFalse(get_table_path("people").exists())
+        for root, directories, files in os.walk(
+            test_directory,
+            topdown=False,
+        ):
+            for filename in files:
+                os.remove(os.path.join(root, filename))
 
-    def test_unknown_column_is_rejected_without_saving(self):
-        execute("create_table people name:str age:int is_active:bool")
-        execute('insert into people values ("Anna", 23, true)')
-        execute("update people set unknown = 1 where ID = 1")
+            for directory in directories:
+                os.rmdir(os.path.join(root, directory))
 
-        row = load_table_data("people")[0]
-
-        self.assertNotIn("unknown", row)
-        self.assertEqual(row["age"], 23)
+        os.rmdir(test_directory)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

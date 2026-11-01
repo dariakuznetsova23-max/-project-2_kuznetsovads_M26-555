@@ -1,11 +1,20 @@
+import json
 import time
-from functools import wraps
+
+from primitive_db.constants import CACHE_LIMIT, CONFIRMATION_ANSWER
+
+
+def _preserve_metadata(wrapper, original):
+    """Preserve the decorated function name and documentation."""
+    wrapper.__name__ = original.__name__
+    wrapper.__doc__ = original.__doc__
+    wrapper.__wrapped__ = original
+    return wrapper
 
 
 def handle_db_errors(func):
-    """Handle database errors and return None on failure."""
+    """Handle database errors without terminating the command loop."""
 
-    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -22,14 +31,13 @@ def handle_db_errors(func):
 
         return None
 
-    return wrapper
+    return _preserve_metadata(wrapper, func)
 
 
 def confirm_action(action_name):
-    """Ask for confirmation before a dangerous operation."""
+    """Request confirmation before performing a dangerous action."""
 
     def decorator(func):
-        @wraps(func)
         def wrapper(*args, **kwargs):
             question = f'Вы уверены, что хотите выполнить "{action_name}"? [y/n]: '
 
@@ -39,21 +47,20 @@ def confirm_action(action_name):
                 print("\nОперация отменена.")
                 return None
 
-            if answer.strip().lower() != "y":
+            if answer.strip().lower() != CONFIRMATION_ANSWER:
                 print("Операция отменена.")
                 return None
 
             return func(*args, **kwargs)
 
-        return wrapper
+        return _preserve_metadata(wrapper, func)
 
     return decorator
 
 
 def log_time(func):
-    """Print function execution time."""
+    """Print the execution time of a function."""
 
-    @wraps(func)
     def wrapper(*args, **kwargs):
         started = time.monotonic()
 
@@ -63,4 +70,22 @@ def log_time(func):
             elapsed = time.monotonic() - started
             print(f"Функция {func.__name__} выполнилась за {elapsed:.3f} секунд.")
 
-    return wrapper
+    return _preserve_metadata(wrapper, func)
+
+
+def create_cacher():
+    """Create a bounded cache stored inside a closure."""
+    cache = {}
+
+    def cache_result(key, value_func):
+        """Return an independent copy of a cached JSON-compatible result."""
+        if key not in cache:
+            if len(cache) >= CACHE_LIMIT:
+                cache.clear()
+
+            result = value_func()
+            cache[key] = json.dumps(result, ensure_ascii=False)
+
+        return json.loads(cache[key])
+
+    return cache_result

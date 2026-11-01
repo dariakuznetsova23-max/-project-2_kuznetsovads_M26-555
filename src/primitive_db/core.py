@@ -1,25 +1,19 @@
 import json
-from copy import deepcopy
 
-from primitive_db.cache import create_cacher
+from primitive_db.constants import ID_COLUMN, VALID_TYPES
 from primitive_db.decorators import (
     confirm_action,
+    create_cacher,
     handle_db_errors,
     log_time,
 )
 from primitive_db.utils import load_table_data, validate_identifier
 
-SUPPORTED_TYPES = {
-    "int": int,
-    "str": str,
-    "bool": bool,
-}
-
 cache_select = create_cacher()
 
 
 def _schema(metadata, table_name):
-    """Return an existing table schema."""
+    """Return and validate an existing table schema."""
     validate_identifier(table_name)
 
     if table_name not in metadata:
@@ -27,18 +21,18 @@ def _schema(metadata, table_name):
 
     schema = metadata[table_name]
 
-    if not isinstance(schema, dict) or schema.get("ID") != "int":
+    if not isinstance(schema, dict) or schema.get(ID_COLUMN) != "int":
         raise ValueError(f"Некорректная схема таблицы {table_name}.")
 
-    if any(kind not in SUPPORTED_TYPES for kind in schema.values()):
+    if any(kind not in VALID_TYPES for kind in schema.values()):
         raise ValueError(f"Неизвестный тип в схеме таблицы {table_name}.")
 
     return schema
 
 
 def _check_value(column, value, type_name):
-    """Validate exact types, distinguishing bool from int."""
-    expected_type = SUPPORTED_TYPES[type_name]
+    """Validate a value using its exact Python type."""
+    expected_type = VALID_TYPES[type_name]
 
     if type(value) is not expected_type:
         raise ValueError(
@@ -47,25 +41,25 @@ def _check_value(column, value, type_name):
 
 
 def _matches(row, where_clause):
-    """Check whether a row satisfies all equalities."""
+    """Check whether a record matches an equality condition."""
     if not where_clause:
         return True
 
     return all(
-        key in row and type(row[key]) is type(value) and row[key] == value
-        for key, value in where_clause.items()
+        column in row and type(row[column]) is type(value) and row[column] == value
+        for column, value in where_clause.items()
     )
 
 
 @handle_db_errors
 def get_schema(metadata, table_name):
-    """Return a copy of a table schema."""
+    """Return a copy of an existing table schema."""
     return dict(_schema(metadata, table_name))
 
 
 @handle_db_errors
 def validate_clause(schema, clause, allow_id=True):
-    """Validate WHERE or SET values against a schema."""
+    """Validate WHERE or SET fields and values."""
     if clause is None:
         return {}
 
@@ -73,7 +67,7 @@ def validate_clause(schema, clause, allow_id=True):
         if column not in schema:
             raise KeyError(column)
 
-        if column == "ID" and not allow_id:
+        if column == ID_COLUMN and not allow_id:
             raise ValueError("Столбец ID нельзя изменять.")
 
         _check_value(column, value, schema[column])
@@ -83,7 +77,7 @@ def validate_clause(schema, clause, allow_id=True):
 
 @handle_db_errors
 def create_table(metadata, table_name, columns):
-    """Add a table schema with an automatic ID column."""
+    """Create a table schema with an automatic ID column."""
     validate_identifier(table_name)
 
     if table_name in metadata:
@@ -92,7 +86,8 @@ def create_table(metadata, table_name, columns):
     if not columns:
         raise ValueError("Укажите хотя бы один пользовательский столбец.")
 
-    schema = {"ID": "int"}
+    schema = {ID_COLUMN: "int"}
+    explicit_id = False
 
     for specification in columns:
         if specification.count(":") != 1:
@@ -103,20 +98,21 @@ def create_table(metadata, table_name, columns):
         column, type_name = specification.split(":")
         validate_identifier(column)
 
-        if type_name not in SUPPORTED_TYPES:
+        if type_name not in VALID_TYPES:
             raise ValueError(
                 f"Некорректный тип: {type_name}. Допустимы int, str, bool."
             )
 
-        if column.upper() == "ID":
-            if column != "ID" or type_name != "int":
+        if column.upper() == ID_COLUMN:
+            if column != ID_COLUMN or type_name != "int":
                 raise ValueError(
                     "ID — зарезервированный столбец. Допустима только запись ID:int."
                 )
 
-            if list(columns).count("ID:int") > 1:
+            if explicit_id:
                 raise ValueError("Столбец ID указан повторно.")
 
+            explicit_id = True
             continue
 
         if column in schema:
@@ -137,16 +133,15 @@ def drop_table(metadata, table_name):
     """Remove a table schema after confirmation."""
     _schema(metadata, table_name)
     del metadata[table_name]
-
     return metadata
 
 
 @handle_db_errors
 @log_time
 def insert(metadata, table_name, values):
-    """Validate values and return rows with a new record."""
+    """Return table records with one validated record added."""
     schema = _schema(metadata, table_name)
-    columns = [column for column in schema if column != "ID"]
+    columns = [column for column in schema if column != ID_COLUMN]
 
     if len(values) != len(columns):
         raise ValueError(
@@ -160,12 +155,18 @@ def insert(metadata, table_name, values):
     table_data = load_table_data(table_name)
 
     for row in table_data:
-        if type(row.get("ID")) is not int:
+        if type(row.get(ID_COLUMN)) is not int:
             raise ValueError("В файле таблицы обнаружен некорректный ID.")
 
-    new_id = max((row["ID"] for row in table_data), default=0) + 1
+    new_id = (
+        max(
+            (row[ID_COLUMN] for row in table_data),
+            default=0,
+        )
+        + 1
+    )
 
-    record = {"ID": new_id}
+    record = {ID_COLUMN: new_id}
     record.update(zip(columns, values, strict=True))
     table_data.append(record)
 
@@ -175,7 +176,7 @@ def insert(metadata, table_name, values):
 @handle_db_errors
 @log_time
 def select(table_data, where_clause=None):
-    """Return cached copies of matching rows."""
+    """Return cached independent copies of matching records."""
     cache_key = json.dumps(
         [table_data, where_clause],
         ensure_ascii=False,
@@ -184,23 +185,23 @@ def select(table_data, where_clause=None):
 
     return cache_select(
         cache_key,
-        lambda: [deepcopy(row) for row in table_data if _matches(row, where_clause)],
+        lambda: [dict(row) for row in table_data if _matches(row, where_clause)],
     )
 
 
 @handle_db_errors
 def update(table_data, set_clause, where_clause):
-    """Return rows with matching records updated."""
+    """Return records with matching rows updated."""
     if not where_clause:
         raise ValueError("Для update необходимо условие where.")
 
     if not set_clause:
         raise ValueError("Укажите изменяемые столбцы.")
 
-    if "ID" in set_clause:
+    if ID_COLUMN in set_clause:
         raise ValueError("Столбец ID нельзя изменять.")
 
-    result = deepcopy(table_data)
+    result = [dict(row) for row in table_data]
 
     for row in result:
         if _matches(row, where_clause):
@@ -216,8 +217,8 @@ def update(table_data, set_clause, where_clause):
 @handle_db_errors
 @confirm_action("удаление записей")
 def delete(table_data, where_clause):
-    """Return rows without matching records after confirmation."""
+    """Return records without matching rows after confirmation."""
     if not where_clause:
         raise ValueError("Для delete необходимо условие where.")
 
-    return [deepcopy(row) for row in table_data if not _matches(row, where_clause)]
+    return [dict(row) for row in table_data if not _matches(row, where_clause)]

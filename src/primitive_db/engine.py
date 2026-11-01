@@ -1,11 +1,13 @@
+import os
+
 import prompt
 from prettytable import PrettyTable
 
 from primitive_db import core
+from primitive_db.constants import ID_COLUMN, META_FILE
 from primitive_db.decorators import handle_db_errors
 from primitive_db.parser import parse_command
 from primitive_db.utils import (
-    METADATA_FILE,
     get_table_path,
     load_metadata,
     load_table_data,
@@ -15,7 +17,7 @@ from primitive_db.utils import (
 
 
 def print_help():
-    """Print the complete command reference."""
+    """Print the available commands."""
     print("\n***База данных***")
     print("\nУправление таблицами:")
     print("create_table <таблица> <столбец:тип> ... - создать таблицу")
@@ -39,13 +41,13 @@ def print_help():
 
 
 def welcome():
-    """Print the application greeting."""
+    """Print the database greeting."""
     print("\nДобро пожаловать в Primitive DB!")
     print_help()
 
 
 def _print_rows(schema, rows):
-    """Display rows using PrettyTable."""
+    """Display query results using PrettyTable."""
     table = PrettyTable()
     table.field_names = list(schema)
 
@@ -57,7 +59,7 @@ def _print_rows(schema, rows):
 
 
 def _create_table(metadata, arguments):
-    """Create a schema and an empty data file."""
+    """Create an empty table and persist its schema."""
     table_name = arguments["table_name"]
     result = core.create_table(metadata, **arguments)
 
@@ -65,7 +67,7 @@ def _create_table(metadata, arguments):
         return
 
     save_table_data(table_name, [])
-    save_metadata(METADATA_FILE, result)
+    save_metadata(META_FILE, result)
 
     columns = ", ".join(
         f"{column}:{kind}" for column, kind in result[table_name].items()
@@ -75,20 +77,24 @@ def _create_table(metadata, arguments):
 
 
 def _drop_table(metadata, table_name):
-    """Drop a schema and remove its data file."""
+    """Remove a table schema and its data file."""
     result = core.drop_table(metadata, table_name)
 
     if result is None:
         return
 
-    save_metadata(METADATA_FILE, result)
-    get_table_path(table_name).unlink(missing_ok=True)
+    save_metadata(META_FILE, result)
+
+    try:
+        os.remove(get_table_path(table_name))
+    except FileNotFoundError:
+        pass
 
     print(f'Таблица "{table_name}" успешно удалена.')
 
 
 def _execute_data_command(command, metadata, arguments):
-    """Execute commands for an existing table."""
+    """Execute a command for an existing table."""
     table_name = arguments["table_name"]
     schema = core.get_schema(metadata, table_name)
 
@@ -100,9 +106,9 @@ def _execute_data_command(command, metadata, arguments):
 
         if result is not None:
             save_table_data(table_name, result)
+            record_id = result[-1][ID_COLUMN]
             print(
-                f"Запись с ID={result[-1]['ID']} "
-                f'успешно добавлена в таблицу "{table_name}".'
+                f'Запись с ID={record_id} успешно добавлена в таблицу "{table_name}".'
             )
 
         return
@@ -160,12 +166,13 @@ def _execute_data_command(command, metadata, arguments):
 
         if result is not None:
             save_table_data(table_name, result)
-            print(f"Успешно удалено записей: {len(table_data) - len(result)}.")
+            count = len(table_data) - len(result)
+            print(f"Успешно удалено записей: {count}.")
 
 
 @handle_db_errors
 def execute(user_input):
-    """Parse and execute one command; False means exit."""
+    """Execute one command and return False only for exit."""
     command, arguments = parse_command(user_input)
 
     if command == "exit":
@@ -175,7 +182,7 @@ def execute(user_input):
         print_help()
         return True
 
-    metadata = load_metadata(METADATA_FILE)
+    metadata = load_metadata(META_FILE)
 
     if command == "create_table":
         _create_table(metadata, arguments)
@@ -194,7 +201,7 @@ def execute(user_input):
 
 
 def run():
-    """Run the interactive database loop."""
+    """Run the interactive command loop."""
     welcome()
 
     while True:

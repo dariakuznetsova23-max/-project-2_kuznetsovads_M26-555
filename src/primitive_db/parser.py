@@ -1,59 +1,96 @@
-import ast
-import re
+import json
 import shlex
 
 from primitive_db.utils import validate_identifier
 
-TOKEN_PATTERN = re.compile(
-    r"""
-    \s*(
-        "(?:\\.|[^"\\])*"
-        |
-        '(?:\\.|[^'\\])*'
-        |
-        [(),=]
-        |
-        [^\s(),="'\\]+
-    )
-    """,
-    re.VERBOSE,
-)
-
-INTEGER_PATTERN = re.compile(r"[+-]?[0-9]+")
-
 
 def tokenize(text):
-    """Split a CRUD command while preserving quoted strings."""
-    text = text.strip()
+    """Split a command while preserving quoted values."""
     tokens = []
     position = 0
+    punctuation = "(),="
 
     while position < len(text):
-        match = TOKEN_PATTERN.match(text, position)
+        character = text[position]
 
-        if match is None:
-            raise ValueError(f"Некорректный фрагмент команды: {text[position:]}")
+        if character.isspace():
+            position += 1
+            continue
 
-        tokens.append(match.group(1))
-        position = match.end()
+        if character in punctuation:
+            tokens.append(character)
+            position += 1
+            continue
+
+        if character in {"'", '"'}:
+            quote = character
+            start = position
+            position += 1
+            escaped = False
+
+            while position < len(text):
+                current = text[position]
+
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == quote:
+                    position += 1
+                    tokens.append(text[start:position])
+                    break
+
+                position += 1
+            else:
+                raise ValueError("Незакрытая кавычка в строковом значении.")
+
+            continue
+
+        start = position
+
+        while position < len(text):
+            current = text[position]
+
+            if current.isspace() or current in punctuation:
+                break
+
+            if current in {"'", '"'}:
+                raise ValueError("Отделяйте строковые значения от других токенов.")
+
+            position += 1
+
+        tokens.append(text[start:position])
 
     return tokens
 
 
 def parse_value(token):
-    """Parse a quoted string, integer, or boolean."""
-    if token.startswith(("'", '"')):
+    """Parse a string, an integer, or a boolean."""
+    if token.startswith('"'):
         try:
-            value = ast.literal_eval(token)
-        except (SyntaxError, ValueError) as error:
+            value = json.loads(token)
+        except ValueError as error:
             raise ValueError(f"Некорректная строка: {token}") from error
 
         if type(value) is not str:
-            raise ValueError("Строковое значение должно быть строкой.")
+            raise ValueError("Ожидалось строковое значение.")
 
         return value
 
-    if INTEGER_PATTERN.fullmatch(token):
+    if token.startswith("'"):
+        try:
+            values = shlex.split(token, comments=False, posix=True)
+        except ValueError as error:
+            raise ValueError(f"Некорректная строка: {token}") from error
+
+        if len(values) != 1:
+            raise ValueError(f"Некорректная строка: {token}")
+
+        return values[0]
+
+    number = token[1:] if token.startswith(("+", "-")) else token
+
+    if number and number.isascii() and number.isdigit():
         return int(token)
 
     if token.lower() == "true":
@@ -64,7 +101,7 @@ def parse_value(token):
 
     raise ValueError(
         f"Некорректное значение: {token}. "
-        "Строки заключайте в кавычки; "
+        "Строки заключайте в кавычки, "
         "числа и true/false вводите без кавычек."
     )
 
@@ -78,7 +115,7 @@ def _take(tokens):
 
 
 def _expect(tokens, expected):
-    """Take and validate a keyword or punctuation token."""
+    """Require a keyword or punctuation token."""
     actual = _take(tokens)
 
     if actual.lower() != expected.lower():
@@ -90,26 +127,24 @@ def _assignment(tokens):
     column = validate_identifier(_take(tokens))
     _expect(tokens, "=")
     value = parse_value(_take(tokens))
-
     return column, value
 
 
 def _where(tokens):
-    """Parse a required WHERE clause with one equality."""
+    """Parse one WHERE equality."""
     _expect(tokens, "where")
     column, value = _assignment(tokens)
-
     return {column: value}
 
 
 def _finish(tokens):
-    """Reject unexpected trailing tokens."""
+    """Reject unexpected trailing arguments."""
     if tokens:
         raise ValueError(f"Лишние аргументы: {' '.join(tokens)}")
 
 
 def _parse_crud(text):
-    """Parse insert, select, update, and delete commands."""
+    """Parse insert, select, update, or delete."""
     tokens = tokenize(text)
     command = _take(tokens).lower()
 
@@ -187,16 +222,18 @@ def _parse_crud(text):
 
 
 def parse_command(text):
-    """Return the command name and parsed arguments."""
-    parts = shlex.split(text, comments=False, posix=True)
+    """Return a command name and its arguments."""
+    text = text.strip()
 
-    if not parts:
+    if not text:
         raise ValueError("Введите команду.")
 
-    command = parts[0].lower()
+    command = text.split(maxsplit=1)[0].lower()
 
     if command in {"insert", "select", "update", "delete"}:
         return _parse_crud(text)
+
+    parts = shlex.split(text, comments=False, posix=True)
 
     if command == "create_table":
         if len(parts) < 3:

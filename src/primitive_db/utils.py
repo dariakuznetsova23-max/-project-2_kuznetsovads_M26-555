@@ -1,65 +1,73 @@
 import json
-import re
-from pathlib import Path
+import os
 
-METADATA_FILE = Path("db_meta.json")
-DATA_DIR = Path("data")
-
-IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+from primitive_db.constants import (
+    DATA_DIR,
+    ENCODING,
+    JSON_INDENT,
+    TEMP_SUFFIX,
+)
 
 
 def validate_identifier(value):
     """Validate a table or column name."""
-    if not isinstance(value, str):
-        raise ValueError("Имя должно быть строкой.")
+    if not isinstance(value, str) or not value:
+        raise ValueError("Имя должно быть непустой строкой.")
 
-    if IDENTIFIER_PATTERN.fullmatch(value) is None:
-        raise ValueError(
-            f"Некорректное имя: {value}. "
-            "Используйте латинские буквы, цифры и подчёркивание; "
-            "имя не должно начинаться с цифры."
-        )
+    if not value.isascii():
+        raise ValueError("В именах используйте только латинские буквы.")
+
+    if not (value[0].isalpha() or value[0] == "_"):
+        raise ValueError("Имя должно начинаться с буквы или подчёркивания.")
+
+    if not all(character.isalnum() or character == "_" for character in value):
+        raise ValueError("Имя может содержать только буквы, цифры и подчёркивание.")
 
     return value
 
 
 def _load_json(filepath, expected_type, default_factory):
-    """Load JSON and check its top-level structure."""
-    path = Path(filepath)
-
+    """Read a JSON file and validate its top-level structure."""
     try:
-        with path.open("r", encoding="utf-8") as file:
+        with open(filepath, encoding=ENCODING) as file:
             data = json.load(file)
     except FileNotFoundError:
         return default_factory()
 
     if not isinstance(data, expected_type):
-        raise ValueError(f"Некорректная структура JSON в файле {path}.")
+        raise ValueError(f"Некорректная структура JSON в файле {filepath}.")
 
     return data
 
 
 def _save_json(filepath, data):
-    """Replace a JSON file after writing a complete temporary file."""
-    path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Write JSON to a temporary file and replace the destination."""
+    parent = os.path.dirname(filepath)
 
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
-    with temporary_path.open("w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
+    temporary_path = f"{filepath}{TEMP_SUFFIX}"
+
+    with open(temporary_path, "w", encoding=ENCODING) as file:
+        json.dump(
+            data,
+            file,
+            ensure_ascii=False,
+            indent=JSON_INDENT,
+        )
         file.write("\n")
 
-    temporary_path.replace(path)
+    os.replace(temporary_path, filepath)
 
 
 def load_metadata(filepath):
-    """Return metadata or an empty dictionary if the file is absent."""
+    """Return database metadata or an empty dictionary."""
     return _load_json(filepath, dict, dict)
 
 
 def save_metadata(filepath, data):
-    """Save table schemas."""
+    """Save database metadata."""
     if not isinstance(data, dict):
         raise ValueError("Метаданные должны быть словарём.")
 
@@ -67,23 +75,23 @@ def save_metadata(filepath, data):
 
 
 def get_table_path(table_name):
-    """Build a safe path to a table data file."""
+    """Return a validated path to a table data file."""
     validate_identifier(table_name)
-    return DATA_DIR / f"{table_name}.json"
+    return os.path.join(DATA_DIR, f"{table_name}.json")
 
 
 def load_table_data(table_name):
-    """Return table rows or an empty list if the file is absent."""
-    data = _load_json(get_table_path(table_name), list, list)
+    """Return table records or an empty list."""
+    records = _load_json(get_table_path(table_name), list, list)
 
-    if any(not isinstance(row, dict) for row in data):
+    if any(not isinstance(record, dict) for record in records):
         raise ValueError("Каждая запись таблицы должна быть словарём.")
 
-    return data
+    return records
 
 
 def save_table_data(table_name, data):
-    """Save table rows."""
+    """Save table records."""
     if not isinstance(data, list):
         raise ValueError("Данные таблицы должны быть списком.")
 

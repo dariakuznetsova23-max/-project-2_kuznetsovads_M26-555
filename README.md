@@ -252,3 +252,8 @@ database
 
 Записи работы программы добавляются ниже после публикации
 на asciinema.org.
+
+read -r -p "https://asciinema.org/a/dFz2UOXf1kPms4fV" CAST_URL
+
+printf '\n### Управление таблицами\n\n&lt;a href="%s"&gt;&lt;img src="%s.svg" alt="Управление таблицами" width="800"&gt;&lt;/a&gt;\n' \
+  "$CAST_URL" "$CAST_URL" &gt;&gt; README.md
